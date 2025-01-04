@@ -6,7 +6,6 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
-
 const app = express();
 
 
@@ -16,8 +15,8 @@ app.use(bodyParser.urlencoded({ extended: false }));
 
 
 const requestLimiter = rateLimit({
-    windowMs: 900000, 
-    max: 100, 
+    windowMs: 900000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per window
 });
 app.use(requestLimiter);
 
@@ -33,7 +32,7 @@ const userSchema = new mongoose.Schema({
     emailAddress: { type: String, required: true, unique: true },
     hashedPassword: { type: String, required: true },
     upi: { type: String, unique: true },
-    accountBalance: { type: Number, default: 1000 },
+    accountBalance: { type: Number, default: 125000 },
 });
 
 const transactionSchema = new mongoose.Schema({
@@ -43,11 +42,10 @@ const transactionSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
 });
 
-
 const User = mongoose.model('AccountHolder', userSchema);
 const Transaction = mongoose.model('TransactionRecord', transactionSchema);
 
-
+// Helper function to create unique UPI
 const createUniqueUPI = async () => {
     let isUnique = false;
     let generatedUPI;
@@ -74,17 +72,12 @@ app.post('/api/register', async (req, res) => {
     try {
         const { fullName, emailAddress, password } = req.body;
 
-        
         const existingUser = await User.findOne({ emailAddress });
         if (existingUser) return res.status(400).json({ message: 'User already exists' });
 
-        
         const passwordHash = await bcrypt.hash(password, 10);
-
-        
         const newUPI = await createUniqueUPI();
 
-        
         const newUser = new User({
             fullName,
             emailAddress,
@@ -121,26 +114,13 @@ app.post('/api/signin', async (req, res) => {
 
         res.status(200).json({
             message: 'Login successful',
+            fullName: existingUser.fullName,
+            emailAddress: existingUser.emailAddress,
             upi: existingUser.upi,
             balance: existingUser.accountBalance,
         });
     } catch (err) {
         console.error('Login error:', err);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-});
-
-
-app.get('/api/user-details/:upi', async (req, res) => {
-    try {
-        const { upi } = req.params;
-        const userInfo = await User.findOne({ upi }).select('-hashedPassword');
-
-        if (!userInfo) return res.status(404).json({ message: 'User not found' });
-
-        res.status(200).json(userInfo);
-    } catch (err) {
-        console.error('Error fetching user details:', err);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
@@ -209,9 +189,25 @@ app.get('/api/transaction-history/:upi', async (req, res) => {
         })
             .sort({ createdAt: -1 })
             .skip((page - 1) * Number(limit))
-            .limit(Number(limit));
+            .limit(Number(limit))
+            .lean();
 
-        res.status(200).json(transactionHistory);
+        const transactionsWithUserDetails = await Promise.all(
+            transactionHistory.map(async (transaction) => {
+                const sender = await User.findOne({ upi: transaction.fromUPI });
+                const receiver = await User.findOne({ upi: transaction.toUPI });
+
+                return {
+                    ...transaction,
+                    senderName: sender?.fullName || 'Unknown',
+                    senderEmail: sender?.emailAddress || 'Unknown',
+                    receiverName: receiver?.fullName || 'Unknown',
+                    receiverEmail: receiver?.emailAddress || 'Unknown',
+                };
+            })
+        );
+
+        res.status(200).json(transactionsWithUserDetails);
     } catch (err) {
         console.error('Error fetching transactions:', err);
         res.status(500).json({ message: 'Internal server error' });
@@ -219,6 +215,20 @@ app.get('/api/transaction-history/:upi', async (req, res) => {
 });
 
 
-const SERVER_PORT = process.env.PORT || 5000;
-app.listen(SERVER_PORT, () => console.log(`Server is up and running on port ${SERVER_PORT}`));
+app.get('/api/user-details/:upi', async (req, res) => {
+    try {
+        const { upi } = req.params;
+        const userInfo = await User.findOne({ upi }).select('-hashedPassword');
 
+        if (!userInfo) return res.status(404).json({ message: 'User not found' });
+
+        res.status(200).json(userInfo);
+    } catch (err) {
+        console.error('Error fetching user details:', err);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+
+const SERVER_PORT = process.env.PORT || 5000;
+app.listen(SERVER_PORT, () => console.log(`Server is running on port ${SERVER_PORT}`));
